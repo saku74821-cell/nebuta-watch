@@ -1,0 +1,52 @@
+name: 睡魔祭空房監控
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 每 10 分鐘（GitHub 排程常會延遲幾分鐘）
+  workflow_dispatch:          # 可以在 Actions 頁面手動按「Run workflow」
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nebuta-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝 Playwright（查官網用的瀏覽器）
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 讀取上次的紀錄（避免重複通知）
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: 查空房
+        run: python nebuta_watch.py --once
+        env:
+          RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+          RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+
+      - name: 儲存這次的紀錄
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
