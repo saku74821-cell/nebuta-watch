@@ -3,8 +3,10 @@
 -----------------
 支援兩種官網訂房系統：
   toyoko : 東横INN 官網（直接讀官網公開的價格/空房資料，不需要瀏覽器）
-  tripla : 用 tripla 訂房系統的官網（ルートイン、ダイワロイネット、JALシティ 等）
+  tripla : 用 tripla 訂房系統的官網（ルートイン、ダイワロイネット、JALシティ、レンブラントイン 等）
            用無頭瀏覽器（Playwright）打開官網的訂房結果頁，讀畫面上的結果。
+  dormy  : ドーミーイン官網（同樣用無頭瀏覽器讀畫面）
+  rjp    : reservation.jp 訂房系統（スマイルホテル 等，同樣用無頭瀏覽器）
 
 每個函式回傳 dict 或 None：
   {"available": bool, "count": 方案數或 None, "url": 訂房頁網址}
@@ -69,7 +71,7 @@ def tripla_url(hotel, checkin, checkout, people):
 
 
 class TriplaBrowser:
-    """共用一個瀏覽器，查完全部再關掉。沒裝 Playwright 時 enabled=False。"""
+    """共用一個瀏覽器，查完全部再關掉。沒裝 Playwright 時 enabled=False。tripla 和 dormy 共用。"""
 
     def __init__(self, log):
         self.log = log
@@ -80,7 +82,7 @@ class TriplaBrowser:
             self._sync_playwright = sync_playwright
             self.enabled = True
         except ImportError:
-            log("ℹ️ 沒有安裝 Playwright，略過 tripla 系統的官網（ルートイン/ダイワロイネット/JALシティ）")
+            log("ℹ️ 沒有安裝 Playwright，略過需要瀏覽器的官網（ルートイン/ダイワロイネット/JALシティ/レンブラントイン/ドーミーイン）")
 
     def __enter__(self):
         if self.enabled:
@@ -101,6 +103,71 @@ class TriplaBrowser:
                 self._pw.stop()
         except Exception:
             pass
+
+    def check_dormy(self, hotel, checkin, checkout, people):
+        """ドーミーイン官網：方案有標價（￥xx,xxx〜）＝有空房；價格顯示「-」＝沒空房。"""
+        if not self.enabled:
+            return None
+        from datetime import date
+        nights = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+        q = [("checkin", checkin.replace("-", "/")), ("number_of_nights", nights),
+             ("search_by_tag", "plan"), ("keyword", hotel["keyword"]),
+             ("number_of_rooms", 1), ("stock_check", "true"),
+             ("number_of_adults[]", people)]
+        url = "https://dormy-hotels.com/reserve/search-plan?" + urllib.parse.urlencode(q)
+        page = self._browser.new_page(locale="ja-JP", user_agent=UA)
+        try:
+            page.goto(url, timeout=60000)
+            try:
+                page.wait_for_function("document.body.innerText.includes('条件にあったプラン')",
+                                       timeout=30000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+            text = page.inner_text("body")
+        except Exception as e:
+            self.log(f"⚠️ {hotel['name']} 官網查詢失敗：{e}")
+            return None
+        finally:
+            page.close()
+        if "条件にあったプラン" not in text:
+            self.log(f"⚠️ {hotel['name']} 官網畫面看不懂（可能改版了），這次略過")
+            return None
+        prices = [int(p.replace(",", "")) for p in re.findall(r"￥\s*([\d,]+)\s*〜", text)]
+        return {"available": bool(prices), "count": len(prices) or 0,
+                "min_total": min(prices) if prices else None, "url": url}
+
+    def check_rjp(self, hotel, checkin, checkout, people):
+        """reservation.jp 系統（スマイルホテル 等）：「件数：N」＝有空房；「予約できる客室がありません」＝沒空房。"""
+        if not self.enabled:
+            return None
+        q = [("checkin_date", checkin.replace("-", "")), ("checkout_date", checkout.replace("-", "")),
+             ("adults", people), ("children", 0), ("rooms", 1), ("dayuseFlg", 0), ("sort", 2)]
+        url = f"{hotel['base'].rstrip('/')}/ja/hotels/{hotel['slug']}/rooms?" + urllib.parse.urlencode(q)
+        page = self._browser.new_page(locale="ja-JP", user_agent=UA)
+        try:
+            page.goto(url, timeout=60000)
+            try:
+                page.wait_for_function(
+                    "document.body.innerText.includes('件数') || "
+                    "document.body.innerText.includes('予約できる客室がありません')", timeout=30000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            text = page.inner_text("body")
+        except Exception as e:
+            self.log(f"⚠️ {hotel['name']} 官網查詢失敗：{e}")
+            return None
+        finally:
+            page.close()
+        if "予約できる客室がありません" in text:
+            return {"available": False, "count": 0, "min_total": None, "url": url}
+        m = re.search(r"件数[:：]\s*(\d+)", text)
+        if m:
+            n = int(m.group(1))
+            return {"available": n > 0, "count": n, "min_total": None, "url": url}
+        self.log(f"⚠️ {hotel['name']} 官網畫面看不懂（可能改版了），這次略過")
+        return None
 
     def check(self, hotel, checkin, checkout, people):
         if not self.enabled:
@@ -141,16 +208,24 @@ class TriplaBrowser:
 def check_all(hotels, checkin, checkout, people, log):
     """查全部官網，回傳 {key: {name, available, ...}}；查詢失敗的不會出現在結果裡。"""
     out = {}
-    tripla = [h for h in hotels if h.get("type") == "tripla"]
+    browser_hotels = [h for h in hotels if h.get("type") in ("tripla", "dormy", "rjp")]
     for h in hotels:
         if h.get("type") == "toyoko":
             r = check_toyoko(h, checkin, checkout, people, log)
             if r:
                 out["toyoko:" + h["code"]] = {"name": h["name"], **r}
-    if tripla:
+    if browser_hotels:
         with TriplaBrowser(log) as br:
-            for h in tripla:
-                r = br.check(h, checkin, checkout, people)
+            for h in browser_hotels:
+                if h["type"] == "dormy":
+                    r = br.check_dormy(h, checkin, checkout, people)
+                    key = "dormy:" + h["keyword"]
+                elif h["type"] == "rjp":
+                    r = br.check_rjp(h, checkin, checkout, people)
+                    key = "rjp:" + h["slug"]
+                else:
+                    r = br.check(h, checkin, checkout, people)
+                    key = "tripla:" + h["code"]
                 if r:
-                    out["tripla:" + h["code"]] = {"name": h["name"], **r}
+                    out[key] = {"name": h["name"], **r}
     return out
