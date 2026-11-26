@@ -217,11 +217,14 @@ def notify(cfg, title, lines, click_url=None, buttons=None):
         req = urllib.request.Request(
             server + "/", data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            urllib.request.urlopen(req, timeout=15).read()
-            sent = True
-        except Exception as e:
-            log(f"⚠️ ntfy 推播失敗：{e}")
+        for attempt in range(3):
+            try:
+                urllib.request.urlopen(req, timeout=15).read()
+                sent = True
+                break
+            except Exception as e:
+                log(f"⚠️ ntfy 推播失敗（第 {attempt + 1} 次）：{e}")
+                time.sleep(10 * (attempt + 1))
 
     em = n.get("email") or {}
     user = secret("SMTP_USER", em.get("smtp_user"))
@@ -273,7 +276,7 @@ def search_official(cfg, stay):
 
 def check_once(cfg, state, send=True):
     """查所有日期組合；回傳新出現的空房清單，並更新 state。"""
-    new_items = []
+    new_items, new_keys = [], []
     for stay in cfg["stays"]:
         label = stay.get("label") or f'{stay["checkin"]}→{stay["checkout"]}'
         prefix = f'{stay["checkin"]}|{stay["checkout"]}|'
@@ -307,6 +310,7 @@ def check_once(cfg, state, send=True):
             if key not in state:
                 state[key] = datetime.now().isoformat(timespec="seconds")
                 new_items.append((label, h))
+                new_keys.append(key)
 
     if new_items and send:
         lines, buttons = [], []
@@ -323,8 +327,13 @@ def check_once(cfg, state, send=True):
             lines.append(f"…另外還有 {len(new_items) - 15} 間")
         lines.append("空房通常很快被訂走，請盡快下訂。")
         title = f"睡魔祭有空房了！{len(new_items)} 筆新空房"
-        notify(cfg, title, lines, click_url=new_items[0][1]["url"], buttons=buttons)
-        log(f"🔔 已通知 {len(new_items)} 筆新空房")
+        if notify(cfg, title, lines, click_url=new_items[0][1]["url"], buttons=buttons):
+            log(f"🔔 已通知 {len(new_items)} 筆新空房")
+        else:
+            # 通知沒送出去：不要記成「已通知」，下一輪會再試一次
+            for k in new_keys:
+                state.pop(k, None)
+            log(f"⚠️ 通知送不出去，{len(new_items)} 筆空房下一輪會再通知一次")
     return new_items
 
 
