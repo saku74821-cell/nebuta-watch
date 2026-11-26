@@ -106,6 +106,13 @@
     "男性専用"
   ],
   "check_interval_sec": 300,
+  "_auto說明": "GitHub 用：日本時間 day_hours_jst 這段時間連續監控，每輪間隔 loop_interval_sec 秒；其他時間每 10 分鐘查一次",
+  "day_hours_jst": [
+    9,
+    23
+  ],
+  "loop_interval_sec": 120,
+  "loop_max_minutes": 330,
   "notify": {
     "_ntfy說明": "手機裝 ntfy App，訂閱一個只有你知道的主題名稱（例如 nebuta-xxxx-8492），填在這裡。",
     "ntfy_topic": "",

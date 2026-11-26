@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.header import Header
 from email.mime.text import MIMEText
 
@@ -30,7 +30,7 @@ import official
 
 API_URL = "https://openapi.rakuten.co.jp/engine/api/Travel/VacantHotelSearch/20170426"
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_PATH = os.path.join(HERE, "state.json")
+STATE_PATH = os.environ.get("STATE_PATH") or os.path.join(HERE, "state.json")
 REQUEST_GAP_SEC = 1.2  # 樂天 API 約每秒 1 次，保守一點
 
 
@@ -328,12 +328,52 @@ def check_once(cfg, state, send=True):
     return new_items
 
 
+def run_auto(cfg, state):
+    """白天（日本時間 day_hours_jst）連續監控；深夜只查一次。"""
+    jst = timezone(timedelta(hours=9))
+    start_h, end_h = cfg.get("day_hours_jst", [9, 23])
+    interval = max(int(cfg.get("loop_interval_sec", 120)), 60)
+    max_min = int(cfg.get("loop_max_minutes", 330))
+
+    now = datetime.now(jst)
+    if not (start_h <= now.hour < end_h):
+        log(f"日本時間 {now:%H:%M}，深夜時段：只查一次")
+        check_once(cfg, state)
+        save_json(STATE_PATH, state)
+        return
+
+    day_end = now.replace(hour=end_h % 24, minute=0, second=0, microsecond=0)
+    if day_end <= now:
+        day_end += timedelta(days=1)
+    deadline = min(time.time() + max_min * 60, day_end.timestamp())
+    log(f"白天時段：連續監控到日本時間 {datetime.fromtimestamp(deadline, jst):%H:%M}，"
+        f"每輪間隔 {interval} 秒")
+    rounds = 0
+    while True:
+        t0 = time.time()
+        try:
+            check_once(cfg, state)
+            save_json(STATE_PATH, state)
+        except Exception as e:
+            log(f"❌ 未預期錯誤：{e}")
+        rounds += 1
+        took = time.time() - t0
+        wait = max(interval - took, 10)
+        # 下一輪預估跑不完就結束，讓下一個排程接手
+        if time.time() + wait + took > deadline:
+            break
+        time.sleep(wait)
+    log(f"本次共查了 {rounds} 輪，結束")
+
+
 def main():
     ap = argparse.ArgumentParser(description="睡魔祭空房監控")
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"))
     ap.add_argument("--once", action="store_true", help="只查一次（給排程用）")
     ap.add_argument("--list", action="store_true", help="列出目前所有空房，不通知")
     ap.add_argument("--test-notify", action="store_true", help="發測試通知")
+    ap.add_argument("--auto", action="store_true",
+                    help="給 GitHub 用：白天連續監控（跑到晚上或時間上限），深夜只查一次")
     args = ap.parse_args()
 
     cfg = load_json(args.config, None)
@@ -366,6 +406,9 @@ def main():
         return
 
     state = load_json(STATE_PATH, {})
+    if args.auto:
+        run_auto(cfg, state)
+        return
     if args.once:
         check_once(cfg, state)
         save_json(STATE_PATH, state)
