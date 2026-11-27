@@ -168,6 +168,26 @@
       "Aomori"
     ]
   },
+  "_agoda說明": "Agoda：青森市（city_id 8950）的搜尋結果，只通知有價格、不是完売的；離市中心超過 max_km_from_center 公里的會略過（淺蟲除外）。",
+  "agoda": {
+    "enabled": true,
+    "min_interval_min": 60,
+    "city_id": 8950,
+    "child_age": 9,
+    "max_km_from_center": 5,
+    "always_keep_keywords": [
+      "浅虫",
+      "Asamushi"
+    ]
+  },
+  "_booking說明": "Booking.com：搜尋「青森駅」，只會列出那幾天能訂的；離青森駅超過 max_km 公里的會略過。",
+  "booking": {
+    "enabled": true,
+    "min_interval_min": 60,
+    "query": "青森駅",
+    "child_age": 9,
+    "max_km": 5
+  },
   "_knt說明": "KNT 睡魔祭特集：方案一上架就通知一次（每 6 小時查一次）。",
   "knt": {
     "enabled": true,

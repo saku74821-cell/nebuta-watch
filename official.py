@@ -451,3 +451,129 @@ def check_knt(kcfg, log):
     if nlinks == 0:
         log("⚠️ KNT 特集頁找不到方案連結（可能改版了）")
     return total
+
+
+# ---------------------------------------------------------------- Agoda
+def check_agoda(gcfg, checkin, checkout, adults, children, child_age, log):
+    """回傳 ({slug: {name, url}}（有價格、沒完売的）, 是否成功)。"""
+    from datetime import date
+    los = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+    q = {"city": gcfg["city_id"], "checkIn": checkin, "los": los, "rooms": 1,
+         "adults": adults, "children": children, "currency": "JPY"}
+    if children:
+        q["childAges"] = ",".join([str(child_age)] * children)
+    url = "https://www.agoda.com/ja-jp/search?" + urllib.parse.urlencode(q)
+
+    async def go(browser):
+        page = await browser.new_page(locale="ja-JP", user_agent=UA)
+        try:
+            await page.goto(url, timeout=60000)
+            try:
+                await page.wait_for_selector('[data-selenium="hotel-item"]', timeout=30000)
+            except Exception:
+                return None
+            await page.wait_for_timeout(3000)
+            items = page.locator('[data-selenium="hotel-item"]')
+            out = []
+            for i in range(min(await items.count(), 40)):
+                it = items.nth(i)
+                try:
+                    await it.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(800)
+                    t = (await it.inner_text()).replace("\n", " | ")
+                    href = await it.locator("a").first.get_attribute("href") or ""
+                except Exception:
+                    continue
+                out.append((t, href))
+            return out
+        finally:
+            await page.close()
+
+    try:
+        items = _run(go)
+    except Exception as e:
+        log(f"⚠️ Agoda 查詢失敗：{e}")
+        return {}, False
+    if items is None:
+        log("⚠️ Agoda 沒有搜尋結果或被擋，這次略過")
+        return {}, False
+    max_km = float(gcfg.get("max_km_from_center", 5))
+    keep_kw = gcfg.get("always_keep_keywords") or []
+    found = {}
+    for t, href in items:
+        if "完売" in t or "¥" not in t:
+            continue
+        m = re.search(r"市内中心まで\s*([\d.]+)\s*km", t)
+        if m and float(m.group(1)) > max_km and not any(k in t for k in keep_kw):
+            continue
+        first = t.split("|")[0].strip()
+        name = first.replace("を新しいタブで開く", "").strip() or first
+        price = re.search(r"¥\s*[\d,]+", t)
+        slug = href.split("?")[0].strip("/")
+        if not slug:
+            continue
+        sep = "&" if "?" in href else "?"
+        link = "https://www.agoda.com" + href if href.startswith("/") else href
+        found[slug] = {"name": f"{name}（{price.group(0) if price else ''}／晚）", "url": link}
+    return found, True
+
+
+# ---------------------------------------------------------------- Booking.com
+def check_booking(kcfg, checkin, checkout, adults, children, child_age, log):
+    """回傳 ({slug: {name, url}}, 是否成功)。Booking 的搜尋結果只會列出那幾天能訂的。"""
+    q = [("ss", kcfg["query"]), ("checkin", checkin), ("checkout", checkout),
+         ("group_adults", adults), ("group_children", children), ("no_rooms", 1),
+         ("selected_currency", "JPY")]
+    q += [("age", child_age)] * children
+    url = "https://www.booking.com/searchresults.ja.html?" + urllib.parse.urlencode(q)
+
+    async def go(browser):
+        page = await browser.new_page(locale="ja-JP", user_agent=UA)
+        try:
+            await page.goto(url, timeout=60000)
+            try:
+                await page.wait_for_function(
+                    "document.querySelectorAll('[data-testid=\"property-card\"]').length > 0 || "
+                    "document.body.innerText.includes('見つかりません')", timeout=30000)
+            except Exception:
+                pass
+            for _ in range(3):
+                await page.mouse.wheel(0, 4000)
+                await page.wait_for_timeout(1500)
+            cards = await page.eval_on_selector_all(
+                '[data-testid="property-card"]',
+                "els=>els.map(e=>({t:e.innerText.replace(/\\n+/g,' | '),"
+                "h:((e.querySelector('a[data-testid=\"title-link\"]')||e.querySelector('a')||{}).href||'')}))")
+            text = await page.inner_text("body")
+            return cards, text
+        finally:
+            await page.close()
+
+    try:
+        r = _run(go)
+    except Exception as e:
+        log(f"⚠️ Booking 查詢失敗：{e}")
+        return {}, False
+    if r is None:
+        return {}, False
+    cards, text = r
+    if not cards and "検索結果" not in text:
+        log("⚠️ Booking 畫面看不懂或被擋，這次略過")
+        return {}, False
+    max_km = float(kcfg.get("max_km", 5))
+    found = {}
+    for c in cards:
+        t = c["t"]
+        m = re.search(r"から\s*([\d.]+)\s*km", t)
+        if m and float(m.group(1)) > max_km:
+            continue
+        slug = c["h"].split("?")[0].rstrip("/").split("/")[-1].replace(".ja.html", "")
+        if not slug:
+            continue
+        name = t.split("|")[0].strip()
+        price = re.search(r"￥\s*[\d,]+", t)
+        link = c["h"].split("?")[0] + "?" + urllib.parse.urlencode(
+            [("checkin", checkin), ("checkout", checkout), ("group_adults", adults),
+             ("group_children", children), ("no_rooms", 1)] + [("age", child_age)] * children)
+        found[slug] = {"name": f"{name}（{price.group(0) if price else ''}）", "url": link}
+    return found, True

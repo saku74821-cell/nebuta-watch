@@ -319,6 +319,20 @@ def slow_sources(cfg, stay, state, prefix, due):
         res, ok = official.check_airbnb(cfg["airbnb"], ci, co, g.get("adults", 1), kids, log)
         f, q = _wrap("Airbnb", res, ok, state, prefix)
         found.update(f); queried |= q; counts.append(f"Airbnb {len(f)}")
+    if due.get("agoda"):
+        g = cfg["guests"]
+        kids = g.get("upper_elem_children", 0) + g.get("lower_elem_children", 0)
+        res, ok = official.check_agoda(cfg["agoda"], ci, co, g.get("adults", 1), kids,
+                                       cfg["agoda"].get("child_age", 9), log)
+        f, q = _wrap("Agoda", res, ok, state, prefix)
+        found.update(f); queried |= q; counts.append(f"Agoda {len(f)}")
+    if due.get("booking"):
+        g = cfg["guests"]
+        kids = g.get("upper_elem_children", 0) + g.get("lower_elem_children", 0)
+        res, ok = official.check_booking(cfg["booking"], ci, co, g.get("adults", 1), kids,
+                                         cfg["booking"].get("child_age", 9), log)
+        f, q = _wrap("Booking", res, ok, state, prefix)
+        found.update(f); queried |= q; counts.append(f"Booking {len(f)}")
     return found, queried, counts
 
 
@@ -341,7 +355,7 @@ def check_once(cfg, state, send=True):
     """查所有日期組合；回傳新出現的空房清單，並更新 state。"""
     new_items, new_keys = [], []
     due = {}
-    for name, dflt in (("jalan", 20), ("airhost", 30), ("airbnb", 60), ("knt", 360)):
+    for name, dflt in (("jalan", 20), ("airhost", 30), ("airbnb", 60), ("agoda", 60), ("booking", 60), ("knt", 360)):
         if slow_due(cfg, state, name, dflt):
             due[name] = True
             state[f"_{name}_last"] = time.time()
