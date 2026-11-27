@@ -69,8 +69,13 @@ def api_get(params, cfg):
     q = dict(params)
     q.update(applicationId=app_id, format="json", responseType="small")
     url = API_URL + "?" + urllib.parse.urlencode(q)
+    # 2026 年起樂天新 API 會檢查 Referer：要跟樂天後台登記的「WebサイトURL」一致
+    referer = (os.environ.get("RAKUTEN_REFERER") or cfg["rakuten"].get("referer")
+               or "https://github.com/saku74821-cell/nebuta-watch")
     req = urllib.request.Request(
-        url, headers={"accessKey": access_key, "User-Agent": "nebuta-watch/1.0"}
+        url, headers={"accessKey": access_key, "User-Agent": "nebuta-watch/1.0",
+                      "Referer": referer, "Origin": referer.rstrip("/").split("/", 3)[0]
+                      + "//" + referer.split("/")[2]}
     )
 
     for attempt in range(4):
@@ -90,7 +95,8 @@ def api_get(params, cfg):
             if e.code == 400:
                 hint = "（參數錯誤：檢查日期格式、人數、hotel_nos）"
             elif e.code in (401, 403):
-                hint = "（金鑰錯誤，或樂天後台的『允許存取來源』沒設好）"
+                hint = ("（金鑰錯誤，或樂天後台登記的 WebサイトURL 跟程式送出的 Referer 不一致："
+                        f"{referer}）")
             raise RuntimeError(f"API HTTP {e.code}{hint}: {body}")
         except (urllib.error.URLError, TimeoutError) as e:
             wait = 10 * (attempt + 1)
