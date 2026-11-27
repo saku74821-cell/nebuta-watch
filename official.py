@@ -369,6 +369,16 @@ def check_airhost(acfg, checkin, checkout, people, log):
 
 # ---------------------------------------------------------------- Airbnb
 def check_airbnb(bcfg, checkin, checkout, adults, children, log):
+    """可設定多個搜尋地點（queries），結果合併。"""
+    qs = bcfg.get("queries") or [bcfg["query"]]
+    found, ok = {}, True
+    for q in qs:
+        f, o = _check_airbnb_one(dict(bcfg, query=q), checkin, checkout, adults, children, log)
+        found.update(f); ok = ok and o
+    return found, ok
+
+
+def _check_airbnb_one(bcfg, checkin, checkout, adults, children, log):
     """回傳 ({room_id: {name, url}}, 是否成功)。搜尋結果本身只會列出那幾天能訂的房源。"""
     q = {"checkin": checkin, "checkout": checkout, "adults": adults,
          "children": children, "currency": "JPY"}
@@ -410,6 +420,8 @@ def check_airbnb(bcfg, checkin, checkout, adults, children, log):
         if not m:
             continue
         if must and not any(k in c["t"] for k in must):
+            continue
+        if re.search(r"\d+月\d+日\s*[～~-]", c["t"]):  # 標了別的日期＝只有部分日期能住，不算
             continue
         parts = [p.strip() for p in c["t"].split("|") if p.strip()]
         title = next((p for p in parts[2:6] if len(p) > 8 and "評価" not in p), parts[0])
@@ -520,6 +532,17 @@ def check_agoda(gcfg, checkin, checkout, adults, children, child_age, log):
 
 # ---------------------------------------------------------------- Booking.com
 def check_booking(kcfg, checkin, checkout, adults, children, child_age, log):
+    """可設定多個搜尋地點（queries），距離以各自的搜尋地點計算，結果合併。"""
+    qs = kcfg.get("queries") or [kcfg["query"]]
+    found, ok = {}, True
+    for q in qs:
+        f, o = _check_booking_one(dict(kcfg, query=q), checkin, checkout, adults, children,
+                                  child_age, log)
+        found.update(f); ok = ok and o
+    return found, ok
+
+
+def _check_booking_one(kcfg, checkin, checkout, adults, children, child_age, log):
     """回傳 ({slug: {name, url}}, 是否成功)。Booking 的搜尋結果只會列出那幾天能訂的。"""
     q = [("ss", kcfg["query"]), ("checkin", checkin), ("checkout", checkout),
          ("group_adults", adults), ("group_children", children), ("no_rooms", 1),
@@ -576,4 +599,202 @@ def check_booking(kcfg, checkin, checkout, adults, children, child_age, log):
             [("checkin", checkin), ("checkout", checkout), ("group_adults", adults),
              ("group_children", children), ("no_rooms", 1)] + [("age", child_age)] * children)
         found[slug] = {"name": f"{name}（{price.group(0) if price else ''}）", "url": link}
+    return found, True
+
+
+# ---------------------------------------------------------------- 樂天旅遊網站（不用 API 金鑰）
+def check_rakuten_web(rcfg, checkin, checkout, adults, upper, lower, log):
+    """樂天旅遊的區域搜尋頁（帶日期），只列出那幾天有空房的住宿。回傳 ({hotel_id: {name, url}}, 是否成功)。"""
+    from datetime import date
+    d1, d2 = date.fromisoformat(checkin), date.fromisoformat(checkout)
+    dq = [("f_nen1", d1.year), ("f_tuki1", d1.month), ("f_hi1", d1.day),
+          ("f_nen2", d2.year), ("f_tuki2", d2.month), ("f_hi2", d2.day),
+          ("f_heya_su", 1), ("f_otona_su", adults), ("f_s1", upper), ("f_s2", lower),
+          ("f_y1", 0), ("f_y2", 0), ("f_y3", 0), ("f_y4", 0)]
+    exclude = rcfg.get("exclude_keywords") or []
+
+    async def go(browser):
+        found, ok = {}, True
+        for area in rcfg["areas"]:
+            q = [("f_dai", "japan"), ("f_chu", area["chu"]), ("f_shou", area["shou"]),
+                 ("f_sai", area.get("sai", "")), ("f_sort", "hotel"), ("f_page", 1),
+                 ("f_hyoji", 30)] + dq
+            url = (f"https://search.travel.rakuten.co.jp/ds/hotellist/{area['path']}?" +
+                   urllib.parse.urlencode(q))
+            try:
+                page, text = await _open_text(
+                    browser, url, "document.body.innerText.includes('件中') || "
+                    "document.body.innerText.includes('見つかりません')", settle=3000)
+                links = await page.eval_on_selector_all(
+                    "a[href*='travel.rakuten.co.jp/HOTEL/']",
+                    "els=>els.map(e=>[e.innerText.trim(),e.href])")
+                await page.close()
+            except Exception as e:
+                log(f"⚠️ 樂天網站（{area['name']}）查詢失敗：{e}")
+                ok = False
+                continue
+            if "件中" not in text and "見つかりません" not in text:
+                log(f"⚠️ 樂天網站（{area['name']}）畫面看不懂或被擋，這次略過")
+                ok = False
+                continue
+            for name, href in links:
+                m = re.search(r"/HOTEL/(\d+)/\1\.html", href)
+                if not m or not name or re.match(r"^[\d.（(]", name) or m.group(1) in found:
+                    continue
+                if any(k in name for k in exclude):
+                    continue
+                found[m.group(1)] = {
+                    "name": name,
+                    "url": f"https://hotel.travel.rakuten.co.jp/hotelinfo/plan/{m.group(1)}?" +
+                           urllib.parse.urlencode(dq)}
+            await asyncio.sleep(2)
+        return found, ok
+
+    r = _run(go)
+    return r if r else ({}, False)
+
+
+# ---------------------------------------------------------------- JTB（るるぶトラベル）
+def check_jtb(jcfg, checkin, checkout, log):
+    """JTB 國內住宿的區域列表（帶日期），只列出那幾天能訂的。回傳 ({htl_id: {name, url}}, 是否成功)。"""
+    from datetime import date
+    nights = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+    d = checkin.replace("-", "")
+
+    async def go(browser):
+        found, ok = {}, True
+        for area in jcfg["areas"]:
+            q = {"multiarea": area["code"], "room": 1, "roomassign": jcfg.get("roomassign", "m2"),
+                 "godate": d, "checkindate": d, "staynight": nights}
+            url = f"https://www.jtb.co.jp/kokunai-hotel/list/{area['code']}/?" + urllib.parse.urlencode(q)
+            try:
+                page, text = await _open_text(browser, url,
+                                              "/\\d+件/.test(document.body.innerText)", settle=3000)
+                links = await page.eval_on_selector_all(
+                    "a[href*='/kokunai-hotel/htl/']", "els=>els.map(e=>[e.innerText.trim(),e.href])")
+                await page.close()
+            except Exception as e:
+                log(f"⚠️ JTB（{area['name']}）查詢失敗：{e}")
+                ok = False
+                continue
+            m = re.search(r"(\d+)件", text)
+            if not m:
+                log(f"⚠️ JTB（{area['name']}）畫面看不懂或被擋，這次略過")
+                ok = False
+                continue
+            if int(m.group(1)) == 0:
+                continue
+            for name, href in links:
+                mm = re.search(r"/kokunai-hotel/htl/(\d{6,8})/?", href)
+                name = name.split("\n")[0].strip()
+                bad = ("アンケート", "アクセス", "評価", "クチコミ", "プラン", "写真", "地図", "詳細")
+                if (not mm or len(name) < 3 or mm.group(1) in found or re.match(r"^[\d.]", name)
+                        or any(b in name for b in bad)):
+                    continue
+                found[mm.group(1)] = {
+                    "name": name,
+                    "url": f"https://www.jtb.co.jp/kokunai-hotel/htl/{mm.group(1)}/plan/?" +
+                           urllib.parse.urlencode({"room": 1, "roomassign": q["roomassign"],
+                                                   "godate": d, "checkindate": d,
+                                                   "staynight": nights})}
+            await asyncio.sleep(2)
+        return found, ok
+
+    r = _run(go)
+    return r if r else ({}, False)
+
+
+# ---------------------------------------------------------------- 近畿日本ツーリスト（KNT）住宿
+def check_knt_yado(kcfg, checkin, checkout, adults, children, log):
+    """KNT 旅館・ホテル的小區域列表（帶日期），只列出那幾天能訂的。回傳 ({宿コード: {name, url}}, 是否成功)。"""
+    from datetime import date
+    nights = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+    base_q = {"stay_ymd": checkin.replace("-", ""), "StayCount": nights, "RoomCount": 1,
+              "GuestCountM": adults, "GuestCountC": children}
+
+    async def go(browser):
+        found, ok = {}, True
+        for area in kcfg["areas"]:
+            url = (f"https://yado.knt.co.jp/yadolist/?catid={area['catid']}&" +
+                   urllib.parse.urlencode(base_q))
+            try:
+                page, text = await _open_text(browser, url,
+                                              "/検索結果\\s*\\d+件/.test(document.body.innerText)",
+                                              settle=3000)
+                await page.close()
+            except Exception as e:
+                log(f"⚠️ KNT 住宿（{area['name']}）查詢失敗：{e}")
+                ok = False
+                continue
+            m = re.search(r"検索結果\s*(\d+)件", text)
+            if not m:
+                log(f"⚠️ KNT 住宿（{area['name']}）畫面看不懂或被擋，這次略過")
+                ok = False
+                continue
+            if int(m.group(1)) == 0:
+                continue
+            body = text[m.end():]
+            prev = 0
+            for mm in re.finditer(r"宿コード：\s*(S\d+)", body):
+                chunk = body[prev:mm.start()]
+                prev = mm.end()
+                chunk = re.split(r"タイプ）|人気順", chunk)[-1]
+                lines = [x.strip() for x in chunk.split("\n") if x.strip()]
+                code = mm.group(1)
+                found[code] = {
+                    "name": (lines[0][:40] if lines else code),
+                    "url": f"https://yado.knt.co.jp/planlist/{code}/?" + urllib.parse.urlencode(base_q)}
+            await asyncio.sleep(2)
+        return found, ok
+
+    r = _run(go)
+    return r if r else ({}, False)
+
+
+# ---------------------------------------------------------------- 日本旅行（NTA）住宿
+def check_nta(ncfg, checkin, checkout, adults, children, log):
+    """日本旅行的區域搜尋（只顯示有空房），回傳 ({宿ID: {name, url}}, 是否成功)。"""
+    from datetime import date
+    nights = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+    d = checkin.replace("-", "")
+    exclude_ids = tuple(ncfg.get("exclude_id_prefix") or [])
+    q = {"Page": 1, "SortOrder": "Popular", "Pax": adults + children, "pax_adm": adults,
+         "pax_adf": 0, "pax_ca": children, "pax_cb": 0, "pax_if": 0, "Days": d, "Month": d[:6],
+         "StayNights": nights, "NumberOfRooms": 1, "Direction": ncfg.get("direction", "02"),
+         "Pref": ncfg.get("pref", "02"), "Area": ncfg["area"], "Condition": "naviPlan",
+         "StockOnly": 1, "ShowSD": 0}
+    url = "https://www.nta.co.jp/nta_yado/?" + urllib.parse.urlencode(q)
+
+    async def go(browser):
+        page, text = await _open_text(browser, url,
+                                      "/検索結果：\\s*\\d+件/.test(document.body.innerText)", settle=3000)
+        links = await page.eval_on_selector_all(
+            "a[href*='/nta_yado/hotel/']", "els=>els.map(e=>[e.innerText.trim(),e.href])")
+        await page.close()
+        return text, links
+
+    try:
+        r = _run(go)
+    except Exception as e:
+        log(f"⚠️ 日本旅行 查詢失敗：{e}")
+        return {}, False
+    if r is None:
+        return {}, False
+    text, links = r
+    m = re.search(r"検索結果：\s*(\d+)件", text)
+    if not m:
+        log("⚠️ 日本旅行 畫面看不懂或被擋，這次略過")
+        return {}, False
+    found = {}
+    if int(m.group(1)) == 0:
+        return found, True
+    for name, href in links:
+        mm = re.search(r"/nta_yado/hotel/(\d+-\d+)/info", href)
+        if not mm or not name or mm.group(1) in found or mm.group(1).startswith(exclude_ids):
+            continue
+        found[mm.group(1)] = {
+            "name": name.split("\n")[0][:40],
+            "url": f"https://www.nta.co.jp/nta_yado/hotel/{mm.group(1)}/?" + urllib.parse.urlencode(
+                {k: q[k] for k in ("Pax", "pax_adm", "pax_adf", "pax_ca", "pax_cb", "pax_if",
+                                   "Days", "StayNights", "NumberOfRooms")})}
     return found, True

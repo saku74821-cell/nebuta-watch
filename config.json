@@ -46,6 +46,11 @@
       "code": "00158"
     },
     {
+      "type": "toyoko",
+      "name": "東横INN新青森駅東口",
+      "code": "00319"
+    },
+    {
       "type": "tripla",
       "name": "ホテルルートイン青森駅前",
       "base": "https://reserve.route-inn.co.jp",
@@ -102,7 +107,7 @@
   "_jalan說明": "Jalan：用車站周邊頁查整區空房。頁面會列出整個「青森・浅虫・八甲田」大區，exclude_keywords 用來濾掉八甲田山區等太遠的旅館。min_interval_min＝最少隔幾分鐘查一次。",
   "jalan": {
     "enabled": true,
-    "min_interval_min": 20,
+    "min_interval_min": 10,
     "areas": [
       {
         "name": "青森駅",
@@ -137,6 +142,42 @@
       "三沢"
     ]
   },
+  "_rakuten_web說明": "樂天旅遊網站的區域搜尋（不用 API 金鑰）：只會列出那幾天有空房的住宿。",
+  "rakuten_web": {
+    "enabled": true,
+    "min_interval_min": 10,
+    "areas": [
+      {
+        "name": "青森市",
+        "path": "Japan-Aomori-Aomori",
+        "chu": "aomori",
+        "shou": "aomori"
+      }
+    ],
+    "exclude_keywords": [
+      "八甲田",
+      "酸ケ湯",
+      "酸ヶ湯",
+      "城ヶ倉",
+      "十和田"
+    ]
+  },
+  "_jtb說明": "JTB 國內住宿：青森市＋淺蟲的區域列表（帶日期），只會列出能訂的。roomassign m2＝大人 2 位（小孩當大人算）。",
+  "jtb": {
+    "enabled": true,
+    "min_interval_min": 20,
+    "roomassign": "m2",
+    "areas": [
+      {
+        "name": "青森市",
+        "code": "020101"
+      },
+      {
+        "name": "浅虫",
+        "code": "020102"
+      }
+    ]
+  },
   "_airhost說明": "TSUNAGIYA（青森的一棟貸切民宿）官網。houses＝要盯的房子編號。",
   "airhost": {
     "enabled": true,
@@ -162,10 +203,14 @@
   "airbnb": {
     "enabled": true,
     "min_interval_min": 60,
-    "query": "青森駅",
     "must_contain": [
       "青森市",
       "Aomori"
+    ],
+    "queries": [
+      "青森駅",
+      "新青森駅",
+      "浅虫温泉"
     ]
   },
   "_agoda說明": "Agoda：青森市（city_id 8950）的搜尋結果，只通知有價格、不是完売的；離市中心超過 max_km_from_center 公里的會略過（淺蟲除外）。",
@@ -177,16 +222,22 @@
     "max_km_from_center": 5,
     "always_keep_keywords": [
       "浅虫",
-      "Asamushi"
+      "Asamushi",
+      "新青森",
+      "Shin-Aomori"
     ]
   },
   "_booking說明": "Booking.com：搜尋「青森駅」，只會列出那幾天能訂的；離青森駅超過 max_km 公里的會略過。",
   "booking": {
     "enabled": true,
     "min_interval_min": 60,
-    "query": "青森駅",
     "child_age": 9,
-    "max_km": 5
+    "max_km": 5,
+    "queries": [
+      "青森駅",
+      "新青森駅",
+      "浅虫温泉"
+    ]
   },
   "_knt說明": "KNT 睡魔祭特集：方案一上架就通知一次（每 6 小時查一次）。",
   "knt": {
@@ -220,5 +271,30 @@
       "smtp_password": "",
       "to": ""
     }
+  },
+  "knt_yado": {
+    "enabled": true,
+    "min_interval_min": 20,
+    "areas": [
+      {
+        "name": "青森市內（含新青森）",
+        "catid": "1020104200002"
+      },
+      {
+        "name": "淺蟲溫泉",
+        "catid": "1020104100001"
+      }
+    ]
+  },
+  "nta": {
+    "enabled": true,
+    "min_interval_min": 20,
+    "direction": "02",
+    "pref": "02",
+    "area": "117",
+    "exclude_id_prefix": [
+      "2115"
+    ],
+    "_note": "Area 117=青森・淺蟲；2115=酸ケ湯（排除）"
   }
 }
