@@ -211,6 +211,8 @@ def notify(cfg, title, lines, click_url=None, buttons=None):
     sent = False
 
     topic = secret("NTFY_TOPIC", n.get("ntfy_topic"))
+    if len(body.encode("utf-8")) > 3800:  # ntfy 上限 4096 位元組
+        body = body.encode("utf-8")[:3700].decode("utf-8", "ignore") + "\n…（內容太長，已截斷）"
     if topic:
         payload = {"topic": topic, "title": title, "message": body,
                    "priority": 5, "tags": ["rotating_light"]}
@@ -391,18 +393,27 @@ def check_once(cfg, state, send=True):
 
     if new_items and send:
         lines, buttons = [], []
-        for label, h in new_items[:15]:
-            lines.append(f"【{label}】{h['name']}")
-            lines.append(f"  最低 {fmt_yen(h['min_total'])}（第一晚・一間）")
+        # ntfy 一則最多 4096 位元組，超過會被拒絕 → 控制在約 3300 位元組內
+        LIMIT, shown = 3300, 0
+        for label, h in new_items:
+            block = [f"【{label}】{h['name']}"]
+            if h.get("min_total"):
+                block.append(f"  最低 {fmt_yen(h['min_total'])}（第一晚・一間）")
             if h["plans"]:
                 p = h["plans"][0]
-                lines.append(f"  {p['room']}｜{p['plan'][:40]}")
-            lines.append(f"  {h['url']}")
-            lines.append("")
-            buttons.append((h["name"], h["url"]))
-        if len(new_items) > 15:
-            lines.append(f"…另外還有 {len(new_items) - 15} 間")
+                block.append(f"  {p['room']}｜{p['plan'][:40]}")
+            block += [f"  {h['url']}", ""]
+            if len("\n".join(lines + block).encode("utf-8")) > LIMIT:
+                break
+            lines += block
+            shown += 1
+            if len(buttons) < 3:
+                buttons.append((h["name"], h["url"]))
+        if len(new_items) > shown:
+            lines.append(f"…另外還有 {len(new_items) - shown} 筆（打開 GitHub 的執行紀錄可看全部）")
         lines.append("空房通常很快被訂走，請盡快下訂。")
+        for label, h in new_items:
+            log(f"  新空房【{label}】{h['name']} {h['url']}")
         title = f"睡魔祭有空房了！{len(new_items)} 筆新空房"
         if notify(cfg, title, lines, click_url=new_items[0][1]["url"], buttons=buttons):
             log(f"🔔 已通知 {len(new_items)} 筆新空房")
