@@ -298,3 +298,156 @@ def check_jalan(jcfg, checkin, checkout, people, log):
     except ImportError:
         return {}, False
     return asyncio.run(_jalan_all(jcfg["areas"], checkin, checkout, people, jcfg, log))
+
+
+# ---------------------------------------------------------------- 慢速來源共用
+async def _open_text(browser, url, done_js, timeout=30000, settle=2000):
+    page = await browser.new_page(locale="ja-JP", user_agent=UA)
+    try:
+        await page.goto(url, timeout=60000)
+        try:
+            await page.wait_for_function(done_js, timeout=timeout)
+        except Exception:
+            pass
+        await page.wait_for_timeout(settle)
+        return page, await page.inner_text("body")
+    except Exception:
+        await page.close()
+        raise
+
+
+async def _with_browser(fn):
+    from playwright.async_api import async_playwright
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(executable_path=os.environ.get("CHROME_PATH") or None)
+        try:
+            return await fn(browser)
+        finally:
+            await browser.close()
+
+
+def _run(fn):
+    try:
+        import playwright  # noqa
+    except ImportError:
+        return None
+    return asyncio.run(_with_browser(fn))
+
+
+# ---------------------------------------------------------------- AirHost（TSUNAGIYA 等一棟貸切）
+def check_airhost(acfg, checkin, checkout, people, log):
+    """回傳 ({house_id: {name, url}}（只含有空房的）, 是否全部成功)。"""
+    base = acfg["base"].rstrip("/")
+
+    async def go(browser):
+        found, ok = {}, True
+        for h in acfg["houses"]:
+            url = (f"{base}/ja/houses/{h['id']}?" +
+                   urllib.parse.urlencode({"start_date": checkin, "end_date": checkout,
+                                           "guests": people}))
+            try:
+                page, text = await _open_text(
+                    browser, url,
+                    "document.body.innerText.includes('カートに追加') || "
+                    "document.body.innerText.includes('部屋はありません')")
+                await page.close()
+            except Exception as e:
+                log(f"⚠️ {acfg['name']}（{h['name']}）查詢失敗：{e}")
+                ok = False
+                continue
+            if "カートに追加" in text and "部屋はありません" not in text:
+                found[str(h["id"])] = {"name": h["name"], "url": url}
+            elif "部屋はありません" not in text:
+                log(f"⚠️ {acfg['name']}（{h['name']}）畫面看不懂，這次略過")
+                ok = False
+            await asyncio.sleep(2)
+        return found, ok
+
+    r = _run(go)
+    return r if r else ({}, False)
+
+
+# ---------------------------------------------------------------- Airbnb
+def check_airbnb(bcfg, checkin, checkout, adults, children, log):
+    """回傳 ({room_id: {name, url}}, 是否成功)。搜尋結果本身只會列出那幾天能訂的房源。"""
+    q = {"checkin": checkin, "checkout": checkout, "adults": adults,
+         "children": children, "currency": "JPY"}
+    url = (f"https://www.airbnb.jp/s/{urllib.parse.quote(bcfg['query'])}/homes?" +
+           urllib.parse.urlencode(q))
+
+    async def go(browser):
+        page, text = await _open_text(
+            browser, url, "document.querySelectorAll('[itemprop=\"itemListElement\"]').length > 0 "
+            "|| document.body.innerText.includes('完全一致する結果はありません')",
+            timeout=40000, settle=4000)
+        try:
+            for _ in range(3):  # 往下捲，載入更多
+                await page.mouse.wheel(0, 5000)
+                await page.wait_for_timeout(1500)
+            cards = await page.eval_on_selector_all(
+                '[itemprop="itemListElement"]',
+                "els=>els.map(e=>({t:e.innerText.replace(/\\n+/g,' | '),"
+                "h:((e.querySelector('a[href*=\"/rooms/\"]')||{}).href||'')}))")
+        finally:
+            await page.close()
+        return cards, text
+
+    try:
+        r = _run(go)
+    except Exception as e:
+        log(f"⚠️ Airbnb 查詢失敗：{e}")
+        return {}, False
+    if r is None:
+        return {}, False
+    cards, text = r
+    if not cards and "完全一致する結果はありません" not in text:
+        log("⚠️ Airbnb 畫面看不懂或被擋，這次略過")
+        return {}, False
+    must = bcfg.get("must_contain") or []
+    found = {}
+    for c in cards:
+        m = re.search(r"/rooms/(\d+)", c["h"])
+        if not m:
+            continue
+        if must and not any(k in c["t"] for k in must):
+            continue
+        parts = [p.strip() for p in c["t"].split("|") if p.strip()]
+        title = next((p for p in parts[2:6] if len(p) > 8 and "評価" not in p), parts[0])
+        price = next((p for p in parts if "JPY" in p and "泊" in p), "")
+        found[m.group(1)] = {
+            "name": f"{parts[1] if len(parts) > 1 else ''}｜{title[:40]} {price[:30]}",
+            "url": f"https://www.airbnb.jp/rooms/{m.group(1)}?" +
+                   urllib.parse.urlencode({"check_in": checkin, "check_out": checkout,
+                                           "adults": adults, "children": children})}
+    return found, True
+
+
+# ---------------------------------------------------------------- KNT（旅行社套裝方案上架）
+def check_knt(kcfg, log):
+    """打開 KNT 睡魔祭特集頁，找出裡面所有「方案搜尋結果」連結，數有幾筆方案。
+    （每年的型錄代碼會變，所以每次都從特集頁重新抓連結）。0＝還沒上架，失敗回 None。"""
+    async def go(browser):
+        page, _ = await _open_text(browser, kcfg["page_url"],
+                                   "document.body.innerText.includes('ねぶた')")
+        links = await page.eval_on_selector_all(
+            "a[href*='searchlist']", "els=>[...new Set(els.map(e=>e.href))]")
+        await page.close()
+        total = 0
+        for u in links[:8]:
+            p, text = await _open_text(browser, u, "document.body.innerText.includes('検索条件')")
+            await p.close()
+            nums = [int(n) for n in re.findall(r"青森\s*\[(\d+)\]", text)]
+            total += max(nums) if nums else 0
+            await asyncio.sleep(2)
+        return total, len(links)
+    try:
+        r = _run(go)
+    except Exception as e:
+        log(f"⚠️ KNT 查詢失敗：{e}")
+        return None
+    if r is None:
+        return None
+    total, nlinks = r
+    if nlinks == 0:
+        log("⚠️ KNT 特集頁找不到方案連結（可能改版了）")
+    return total

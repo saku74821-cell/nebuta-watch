@@ -280,36 +280,73 @@ def search_official(cfg, stay):
     return found, {"官網:" + k for k in res}
 
 
-def search_jalan(cfg, stay, state, prefix):
-    """查 Jalan。回傳 (有空房的 {key: hotel}, 這次有成功查到的 key 集合)。"""
-    jcfg = cfg["jalan"]
-    res, ok = official.check_jalan(jcfg, stay["checkin"], stay["checkout"],
-                                   guests_total(cfg), log)
-    found = {"Jalan:" + hid: {"hotelNo": hid, "name": f"【Jalan】{h['name']}",
-                              "url": h["url"], "plans": [], "min_total": None}
-             for hid, h in res.items()}
-    # 查詢成功時，之前記錄過、這次沒出現的 Jalan 空房都算「已確認沒房」→ 之後再出現會再通知
+def _wrap(tag, res, ok, state, prefix):
+    """把慢速來源的結果轉成統一格式；查詢成功時，之前有、這次沒出現的都算已確認沒房。"""
+    found = {f"{tag}:{i}": {"hotelNo": i, "name": f"【{tag}】{h['name']}", "url": h["url"],
+                            "plans": [], "min_total": None} for i, h in res.items()}
     queried = set(found)
     if ok:
-        queried |= {k[len(prefix):] for k in state
-                    if k.startswith(prefix + "Jalan:")}
+        queried |= {k[len(prefix):] for k in state if k.startswith(f"{prefix}{tag}:")}
     return found, queried
 
 
-def jalan_due(cfg, state):
-    jcfg = cfg.get("jalan") or {}
-    if not jcfg.get("enabled") or not jcfg.get("areas"):
+def slow_due(cfg, state, name, default_min):
+    scfg = cfg.get(name) or {}
+    if not scfg.get("enabled"):
         return False
-    last = state.get("_jalan_last", 0)
-    return time.time() - last >= int(jcfg.get("min_interval_min", 20)) * 60
+    last = state.get(f"_{name}_last", 0)
+    return time.time() - last >= int(scfg.get("min_interval_min", default_min)) * 60
+
+
+def slow_sources(cfg, stay, state, prefix, due):
+    """Jalan / TSUNAGIYA / Airbnb：頻率較低的來源。"""
+    found, queried, counts = {}, set(), []
+    ci, co, people = stay["checkin"], stay["checkout"], guests_total(cfg)
+    if due.get("jalan"):
+        res, ok = official.check_jalan(cfg["jalan"], ci, co, people, log)
+        f, q = _wrap("Jalan", {i: {"name": h["name"], "url": h["url"]} for i, h in res.items()},
+                     ok, state, prefix)
+        found.update(f); queried |= q; counts.append(f"Jalan {len(f)}")
+    if due.get("airhost"):
+        res, ok = official.check_airhost(cfg["airhost"], ci, co, people, log)
+        f, q = _wrap(cfg["airhost"].get("name", "AirHost"), res, ok, state, prefix)
+        found.update(f); queried |= q; counts.append(f"{cfg['airhost'].get('name')} {len(f)}")
+    if due.get("airbnb"):
+        g = cfg["guests"]
+        kids = g.get("upper_elem_children", 0) + g.get("lower_elem_children", 0)
+        res, ok = official.check_airbnb(cfg["airbnb"], ci, co, g.get("adults", 1), kids, log)
+        f, q = _wrap("Airbnb", res, ok, state, prefix)
+        found.update(f); queried |= q; counts.append(f"Airbnb {len(f)}")
+    return found, queried, counts
+
+
+def check_knt(cfg, state):
+    """旅行社方案上架通知（不分日期，只通知一次）。"""
+    kcfg = cfg["knt"]
+    n = official.check_knt(kcfg, log)
+    if n is None:
+        return []
+    log(f"KNT 睡魔祭方案：{n} 筆")
+    if n > 0 and "KNT:listed" not in state:
+        state["KNT:listed"] = datetime.now().isoformat(timespec="seconds")
+        return [("旅行社", {"hotelNo": "KNT", "name": f"【KNT】睡魔祭套裝方案上架了（{n} 筆）",
+                            "url": kcfg.get("page_url") or kcfg["url"], "plans": [],
+                            "min_total": None}), ]
+    return []
 
 
 def check_once(cfg, state, send=True):
     """查所有日期組合；回傳新出現的空房清單，並更新 state。"""
     new_items, new_keys = [], []
-    do_jalan = jalan_due(cfg, state)
-    if do_jalan:
-        state["_jalan_last"] = time.time()
+    due = {}
+    for name, dflt in (("jalan", 20), ("airhost", 30), ("airbnb", 60), ("knt", 360)):
+        if slow_due(cfg, state, name, dflt):
+            due[name] = True
+            state[f"_{name}_last"] = time.time()
+    if due.get("knt"):
+        for item in check_knt(cfg, state):
+            new_items.append(item)
+            new_keys.append("KNT:listed")
     for stay in cfg["stays"]:
         label = stay.get("label") or f'{stay["checkin"]}→{stay["checkout"]}'
         prefix = f'{stay["checkin"]}|{stay["checkout"]}|'
@@ -326,13 +363,11 @@ def check_once(cfg, state, send=True):
         off, off_ok = search_official(cfg, stay)  # 官網
         hotels.update(off)
         queried_ok |= off_ok
-        jl = {}
-        if do_jalan:  # Jalan（頻率較低）
-            jl, jl_ok = search_jalan(cfg, stay, state, prefix)
-            hotels.update(jl)
-            queried_ok |= jl_ok
-        log(f"{label}：樂天 {len(hotels) - len(off) - len(jl)} 間、官網 {len(off)} 間"
-            + (f"、Jalan {len(jl)} 間" if do_jalan else "") + " 有空房")
+        sl, sl_ok, counts = slow_sources(cfg, stay, state, prefix, due)
+        hotels.update(sl)
+        queried_ok |= sl_ok
+        log(f"{label}：樂天 {len(hotels) - len(off) - len(sl)} 間、官網 {len(off)} 間"
+            + "".join(f"、{c} 間" for c in counts) + " 有空房")
 
         current = {prefix + no for no in hotels}
         # 消失的空房從 state 移除 → 之後再出現會再通知一次
@@ -341,7 +376,7 @@ def check_once(cfg, state, send=True):
             if not k.startswith(prefix) or k in current:
                 continue
             src = k[len(prefix):]
-            if src.startswith(("官網:", "Jalan:")):
+            if ":" in src:  # 官網／Jalan／TSUNAGIYA／Airbnb：只移除這次有成功查到的
                 if src in queried_ok:
                     del state[k]
                 continue

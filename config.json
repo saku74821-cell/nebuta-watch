@@ -137,6 +137,43 @@
       "三沢"
     ]
   },
+  "_airhost說明": "TSUNAGIYA（青森的一棟貸切民宿）官網。houses＝要盯的房子編號。",
+  "airhost": {
+    "enabled": true,
+    "name": "TSUNAGIYA",
+    "min_interval_min": 30,
+    "base": "https://tsunagiya.airhost.co",
+    "houses": [
+      {
+        "id": 944190,
+        "name": "PLACER SHINMACHI（青森駅徒歩2分・最大9名）"
+      },
+      {
+        "id": 944184,
+        "name": "IRODORI AOMORI（青森駅徒歩3分・最大8名）"
+      },
+      {
+        "id": 944191,
+        "name": "AOMORI STAY 灯 -akari-（青森駅徒歩5分・最大8名）"
+      }
+    ]
+  },
+  "_airbnb說明": "Airbnb：搜尋結果只會列出那幾天能訂的房源；must_contain 用來只留青森市的。頻率很低，避免被擋。",
+  "airbnb": {
+    "enabled": true,
+    "min_interval_min": 60,
+    "query": "青森駅",
+    "must_contain": [
+      "青森市",
+      "Aomori"
+    ]
+  },
+  "_knt說明": "KNT 睡魔祭特集：方案一上架就通知一次（每 6 小時查一次）。",
+  "knt": {
+    "enabled": true,
+    "min_interval_min": 360,
+    "page_url": "https://www.knt.co.jp/meito/sp/aomori_nebuta/tohoku.html"
+  },
   "exclude_keywords": [
     "カプセル",
     "ドミトリー",
