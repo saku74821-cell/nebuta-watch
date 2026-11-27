@@ -280,9 +280,36 @@ def search_official(cfg, stay):
     return found, {"官網:" + k for k in res}
 
 
+def search_jalan(cfg, stay, state, prefix):
+    """查 Jalan。回傳 (有空房的 {key: hotel}, 這次有成功查到的 key 集合)。"""
+    jcfg = cfg["jalan"]
+    res, ok = official.check_jalan(jcfg, stay["checkin"], stay["checkout"],
+                                   guests_total(cfg), log)
+    found = {"Jalan:" + hid: {"hotelNo": hid, "name": f"【Jalan】{h['name']}",
+                              "url": h["url"], "plans": [], "min_total": None}
+             for hid, h in res.items()}
+    # 查詢成功時，之前記錄過、這次沒出現的 Jalan 空房都算「已確認沒房」→ 之後再出現會再通知
+    queried = set(found)
+    if ok:
+        queried |= {k[len(prefix):] for k in state
+                    if k.startswith(prefix + "Jalan:")}
+    return found, queried
+
+
+def jalan_due(cfg, state):
+    jcfg = cfg.get("jalan") or {}
+    if not jcfg.get("enabled") or not jcfg.get("areas"):
+        return False
+    last = state.get("_jalan_last", 0)
+    return time.time() - last >= int(jcfg.get("min_interval_min", 20)) * 60
+
+
 def check_once(cfg, state, send=True):
     """查所有日期組合；回傳新出現的空房清單，並更新 state。"""
     new_items, new_keys = [], []
+    do_jalan = jalan_due(cfg, state)
+    if do_jalan:
+        state["_jalan_last"] = time.time()
     for stay in cfg["stays"]:
         label = stay.get("label") or f'{stay["checkin"]}→{stay["checkout"]}'
         prefix = f'{stay["checkin"]}|{stay["checkout"]}|'
@@ -299,7 +326,13 @@ def check_once(cfg, state, send=True):
         off, off_ok = search_official(cfg, stay)  # 官網
         hotels.update(off)
         queried_ok |= off_ok
-        log(f"{label}：樂天 {len(hotels) - len(off)} 間、官網 {len(off)} 間有空房")
+        jl = {}
+        if do_jalan:  # Jalan（頻率較低）
+            jl, jl_ok = search_jalan(cfg, stay, state, prefix)
+            hotels.update(jl)
+            queried_ok |= jl_ok
+        log(f"{label}：樂天 {len(hotels) - len(off) - len(jl)} 間、官網 {len(off)} 間"
+            + (f"、Jalan {len(jl)} 間" if do_jalan else "") + " 有空房")
 
         current = {prefix + no for no in hotels}
         # 消失的空房從 state 移除 → 之後再出現會再通知一次
@@ -308,8 +341,11 @@ def check_once(cfg, state, send=True):
             if not k.startswith(prefix) or k in current:
                 continue
             src = k[len(prefix):]
-            if (src.startswith("官網:") and src in queried_ok) or \
-               (not src.startswith("官網:") and rakuten_ok):
+            if src.startswith(("官網:", "Jalan:")):
+                if src in queried_ok:
+                    del state[k]
+                continue
+            if rakuten_ok:
                 del state[k]
         for no, h in hotels.items():
             key = prefix + no

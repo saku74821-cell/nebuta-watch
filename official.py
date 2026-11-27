@@ -212,3 +212,89 @@ def check_all(hotels, checkin, checkout, people, log):
             return out
         out.update(asyncio.run(_browser_all(browser_hotels, checkin, checkout, people, log)))
     return out
+
+
+# ---------------------------------------------------------------- じゃらん（Jalan）
+# 用車站的「周邊住宿」頁面查，一頁就能看到整區有空房的旅館。
+# 這些頁面會列出整個「青森・浅虫・八甲田」大區，所以用 exclude 關鍵字濾掉八甲田山區等遠的地方。
+JALAN_JS = r"""() => {
+  const out = []; const seen = new Set();
+  document.querySelectorAll('a[href*="/yad"]').forEach(a => {
+    const m = a.href.match(/\/yad(\d+)\//); if (!m || seen.has(m[1])) return;
+    const name = (a.innerText || '').trim().split('\n')[0]; if (!name || name.length < 2) return;
+    seen.add(m[1]);
+    let card = a;
+    for (let i = 0; i < 10 && card.parentElement; i++) { card = card.parentElement; if (card.innerText.length > 300) break; }
+    out.push({id: m[1], name: name, ctx: card.innerText.replace(/\n+/g, ' | ').slice(0, 600)});
+  });
+  return out;
+}"""
+
+
+def _jalan_dates(checkin, checkout):
+    from datetime import date
+    d1, d2 = date.fromisoformat(checkin), date.fromisoformat(checkout)
+    return [("stayYear", d1.year), ("stayMonth", d1.month), ("stayDay", d1.day),
+            ("stayCount", (d2 - d1).days)]
+
+
+async def _jalan_area(browser, area, checkin, checkout, people, jcfg, log):
+    q = _jalan_dates(checkin, checkout) + [("roomCount", 1), ("adultNum", people),
+                                          ("dateUndecided", 0)]
+    url = f"https://www.jalan.net/020000/STA_{area['station_code']}/?" + urllib.parse.urlencode(q)
+    page = await browser.new_page(locale="ja-JP", user_agent=UA)
+    try:
+        await page.goto(url, timeout=60000)
+        try:
+            await page.wait_for_function(
+                "document.body.innerText.includes('軒ありました') || "
+                "document.body.innerText.includes('見つかりませんでした')", timeout=30000)
+        except Exception:
+            pass
+        text = await page.inner_text("body")
+        cards = await page.evaluate(JALAN_JS) if "軒ありました" in text else []
+    finally:
+        await page.close()
+    if "見つかりませんでした" in text and "軒ありました" not in text:
+        return []
+    if "軒ありました" not in text:
+        raise RuntimeError("Jalan 畫面看不懂（可能改版了）")
+    allow_area = jcfg.get("allow_area_keyword", "青森・浅虫・八甲田")
+    exclude = jcfg.get("exclude_keywords", [])
+    found = []
+    for c in cards:
+        ctx = c["ctx"]
+        if "エリア" in ctx and allow_area not in ctx:
+            continue  # 別的大區（三沢、東津軽…）
+        if any(k in c["name"] or k in ctx for k in exclude):
+            continue
+        plan = (f"https://www.jalan.net/yad{c['id']}/plan/?" +
+                urllib.parse.urlencode(q))
+        found.append({"id": c["id"], "name": c["name"], "area": area["name"], "url": plan})
+    return found
+
+
+async def _jalan_all(areas, checkin, checkout, people, jcfg, log):
+    from playwright.async_api import async_playwright
+    results, ok = {}, True
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(executable_path=os.environ.get("CHROME_PATH") or None)
+        for area in areas:  # 一區一區慢慢查，不同時開
+            try:
+                for h in await _jalan_area(browser, area, checkin, checkout, people, jcfg, log):
+                    results.setdefault(h["id"], h)
+            except Exception as e:
+                log(f"⚠️ Jalan（{area['name']}）查詢失敗：{e}")
+                ok = False
+            await asyncio.sleep(3)
+        await browser.close()
+    return results, ok
+
+
+def check_jalan(jcfg, checkin, checkout, people, log):
+    """回傳 ({hotel_id: {...}}, 是否全部成功)。"""
+    try:
+        import playwright  # noqa
+    except ImportError:
+        return {}, False
+    return asyncio.run(_jalan_all(jcfg["areas"], checkin, checkout, people, jcfg, log))

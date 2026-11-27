@@ -99,6 +99,44 @@
       "slug": "aomori"
     }
   ],
+  "_jalan說明": "Jalan：用車站周邊頁查整區空房。頁面會列出整個「青森・浅虫・八甲田」大區，exclude_keywords 用來濾掉八甲田山區等太遠的旅館。min_interval_min＝最少隔幾分鐘查一次。",
+  "jalan": {
+    "enabled": true,
+    "min_interval_min": 20,
+    "areas": [
+      {
+        "name": "青森駅",
+        "station_code": "990007"
+      },
+      {
+        "name": "新青森駅",
+        "station_code": "990987"
+      },
+      {
+        "name": "浅虫温泉",
+        "station_code": "002922"
+      }
+    ],
+    "allow_area_keyword": "青森・浅虫・八甲田",
+    "exclude_keywords": [
+      "八甲田",
+      "酸ケ湯",
+      "酸ヶ湯",
+      "城ヶ倉",
+      "城ケ倉",
+      "谷地温泉",
+      "猿倉",
+      "蔦温泉",
+      "睡蓮沼",
+      "ベルジャヤ",
+      "十和田",
+      "奥入瀬",
+      "中央インター",
+      "浪岡",
+      "青森屋",
+      "三沢"
+    ]
+  },
   "exclude_keywords": [
     "カプセル",
     "ドミトリー",
