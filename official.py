@@ -3,6 +3,7 @@
 -----------------
 支援兩種官網訂房系統：
   toyoko : 東横INN 官網（直接讀官網公開的價格/空房資料，不需要瀏覽器）
+  pro489 : 489pro-X 預約系統（ReLabo），讀公開空房月曆
   tripla : 用 tripla 訂房系統的官網（ルートイン、ダイワロイネット、JALシティ、レンブラントイン 等）
            用無頭瀏覽器（Playwright）打開官網的訂房結果頁，讀畫面上的結果。
   dormy  : ドーミーイン官網（同樣用無頭瀏覽器讀畫面）
@@ -53,6 +54,37 @@ def check_toyoko(hotel, checkin, checkout, people, log):
             f"?start={checkin}&end={checkout}&room=1&people={people}")
     return {"available": ok, "count": None,
             "min_total": info.get("lowestPrice") or None, "url": page}
+
+
+# ---------------------------------------------------------------- 489pro-X（ReLabo 等）
+def check_pro489(hotel, checkin, checkout, people, log):
+    """489pro-X 預約系統：讀官網空房月曆（公開資料）。保守判斷：住的每一晚都要有價格才算有空房。"""
+    from datetime import date, timedelta as _td
+    d1, d2 = date.fromisoformat(checkin), date.fromisoformat(checkout)
+    nights = (d2 - d1).days
+    last = d2 - _td(days=1)
+    slug = hotel["slug"]
+    q = {"nights": 1, "r_num": 1, "num": people, "show": "room", "isPriceTotalPerson": "false",
+         "dt_from": d1.strftime("%Y%m%d"), "dt_to": last.strftime("%Y%m%d"),
+         "g": "s", "f": slug, "l": "ja"}
+    url = "https://www.489pro-x.com/api/searchCalendar/?" + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA, "Accept": "application/json",
+        "Referer": f"https://www.489pro-x.com/ja/s/{slug}/search/"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = json.load(r)["data"]
+        prices = []
+        for i in range(nights):
+            dd = d1 + _td(days=i)
+            prices.append(data[dd.strftime("%Y%m")][str(dd.day)].get("price"))
+    except Exception as e:
+        log(f"⚠️ {hotel['name']} 官網查詢失敗：{e}")
+        return None
+    ok = all(p is not None for p in prices)
+    page = (f"https://www.489pro-x.com/ja/s/{slug}/search/?" +
+            urllib.parse.urlencode({"nights": nights, "r_num": 1, "num": people, "show": "plan"}))
+    return {"available": ok, "count": None, "min_total": sum(prices) if ok else None, "url": page}
 
 
 # ---------------------------------------------------------------- tripla
@@ -162,7 +194,29 @@ async def _rjp(browser, hotel, checkin, checkout, people, log):
     return None
 
 
+async def _ban489(browser, hotel, checkin, checkout, people, log):
+    """予約番（reserve.489ban.net，海扇閣等）：「N件中」＝有方案可訂；「プランがございません」＝沒空房。"""
+    from datetime import date
+    nights = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+    q = [("numberOfNights", nights), ("roomCount", 1),
+         (f"guests[{hotel['adult_key']}][adult]", people), ("date", checkin + " 00:00:00")]
+    url = (f"https://reserve.489ban.net/client/{hotel['slug']}/0/plan?" + urllib.parse.urlencode(q))
+    text = await _read_page(
+        browser, url,
+        "/\\d+件中/.test(document.body.innerText) || "
+        "document.body.innerText.includes('プランがございません')", 2000)
+    if "プランがございません" in text:
+        return {"available": False, "count": 0, "min_total": None, "url": url}
+    m = re.search(r"(\d+)件中", text)
+    if m:
+        n = int(m.group(1))
+        return {"available": n > 0, "count": n, "min_total": None, "url": url}
+    log(f"⚠️ {hotel['name']} 官網畫面看不懂（可能改版了），這次略過")
+    return None
+
+
 _CHECKERS = {"tripla": (_tripla, lambda h: "tripla:" + h["code"]),
+             "ban489": (_ban489, lambda h: "ban489:" + h["slug"]),
              "dormy": (_dormy, lambda h: "dormy:" + h["keyword"]),
              "rjp": (_rjp, lambda h: "rjp:" + h["slug"])}
 
@@ -203,6 +257,10 @@ def check_all(hotels, checkin, checkout, people, log):
             r = check_toyoko(h, checkin, checkout, people, log)
             if r:
                 out["toyoko:" + h["code"]] = {"name": h["name"], **r}
+        elif h.get("type") == "pro489":
+            r = check_pro489(h, checkin, checkout, people, log)
+            if r:
+                out["pro489:" + h["slug"]] = {"name": h["name"], **r}
     browser_hotels = [h for h in hotels if h.get("type") in _CHECKERS]
     if browser_hotels:
         try:
@@ -797,4 +855,65 @@ def check_nta(ncfg, checkin, checkout, adults, children, log):
             "url": f"https://www.nta.co.jp/nta_yado/hotel/{mm.group(1)}/?" + urllib.parse.urlencode(
                 {k: q[k] for k in ("Pax", "pax_adm", "pax_adf", "pax_ca", "pax_cb", "pax_if",
                                    "Days", "StayNights", "NumberOfRooms")})}
+    return found, True
+
+
+# ---------------------------------------------------------------- Trip.com
+def check_trip(tcfg, checkin, checkout, adults, children, child_age, log):
+    """Trip.com 城市列表（帶日期）。有「空室を確認」且沒「満室」的才算。回傳 ({hotelId: {name, url}}, 是否成功)。"""
+    q = {"city": tcfg["city_id"], "checkin": checkin.replace("-", "/"),
+         "checkout": checkout.replace("-", "/"), "crn": 1, "adult": adults,
+         "children": children, "curr": "JPY", "locale": "ja-JP"}
+    if children:
+        q["ages"] = ",".join([str(child_age)] * children)
+    url = "https://jp.trip.com/hotels/list?" + urllib.parse.urlencode(q)
+    exclude = tcfg.get("exclude_keywords") or []
+
+    async def go(browser):
+        page = await browser.new_page(locale="ja-JP", user_agent=UA)
+        try:
+            await page.goto(url, timeout=60000)
+            try:
+                await page.wait_for_function(
+                    "document.querySelectorAll('.hotel-card-versionb').length > 0 || "
+                    "document.body.innerText.includes('条件に合うホテルは以上です')", timeout=40000)
+            except Exception:
+                pass
+            for _ in range(5):
+                try:
+                    await page.evaluate("window.scrollTo(0, (document.body||document.documentElement).scrollHeight)")
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1500)
+            cards = await page.eval_on_selector_all(
+                ".hotel-card-versionb",
+                "els=>els.map(e=>({id:e.id,t:e.innerText.replace(/\\n+/g,' | '),"
+                "h:((e.querySelector('a[href*=\"hotelId\"]')||{}).href||'')}))")
+            text = await page.inner_text("body")
+            return cards, text
+        finally:
+            await page.close()
+
+    try:
+        r = _run(go)
+    except Exception as e:
+        log(f"⚠️ Trip.com 查詢失敗：{e}")
+        return {}, False
+    if r is None:
+        return {}, False
+    cards, text = r
+    if not cards and "条件に合うホテルは以上です" not in text and "軒のホテル" not in text:
+        log("⚠️ Trip.com 畫面看不懂或被擋，這次略過")
+        return {}, False
+    found = {}
+    for c in cards:
+        t = c["t"]
+        if not c["id"] or "満室" in t or "空室を確認" not in t:
+            continue
+        if any(k in t for k in exclude):
+            continue
+        name = t.split("|")[0].strip()
+        total = re.search(r"合計金額：\s*([\d,]+円)", t)
+        found[c["id"]] = {"name": f"{name}（合計 {total.group(1) if total else '?'}）",
+                          "url": c["h"] or f"https://jp.trip.com/hotels/detail/?hotelId={c['id']}"}
     return found, True

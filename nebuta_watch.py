@@ -344,6 +344,13 @@ def slow_sources(cfg, stay, state, prefix, due):
         res, ok = official.check_jtb(cfg["jtb"], ci, co, log)
         f, q = _wrap("JTB", res, ok, state, prefix)
         found.update(f); queried |= q; counts.append(f"JTB {len(f)}")
+    if due.get("trip"):
+        g = cfg["guests"]
+        kids = g.get("upper_elem_children", 0) + g.get("lower_elem_children", 0)
+        res, ok = official.check_trip(cfg["trip"], ci, co, g.get("adults", 1), kids,
+                                      cfg["trip"].get("child_age", 9), log)
+        f, q = _wrap("Trip.com", res, ok, state, prefix)
+        found.update(f); queried |= q; counts.append(f"Trip.com {len(f)}")
     if due.get("knt_yado") or due.get("nta"):
         g = cfg["guests"]
         kids = g.get("upper_elem_children", 0) + g.get("lower_elem_children", 0)
@@ -377,7 +384,7 @@ def check_once(cfg, state, send=True):
     """查所有日期組合；回傳新出現的空房清單，並更新 state。"""
     new_items, new_keys = [], []
     due = {}
-    for name, dflt in (("jalan", 20), ("rakuten_web", 20), ("jtb", 30), ("knt_yado", 30), ("nta", 30), ("airhost", 30), ("airbnb", 60), ("agoda", 60), ("booking", 60), ("knt", 360)):
+    for name, dflt in (("jalan", 20), ("rakuten_web", 20), ("jtb", 30), ("knt_yado", 30), ("nta", 30), ("trip", 30), ("airhost", 30), ("airbnb", 60), ("agoda", 60), ("booking", 60), ("knt", 360)):
         if slow_due(cfg, state, name, dflt):
             due[name] = True
             state[f"_{name}_last"] = time.time()

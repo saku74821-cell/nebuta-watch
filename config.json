@@ -102,6 +102,17 @@
       "name": "スマイルホテル青森",
       "base": "https://go-smile-hotel-chain.reservation.jp",
       "slug": "aomori"
+    },
+    {
+      "type": "pro489",
+      "name": "ReLabo Medical Spa & Stay",
+      "slug": "relabo"
+    },
+    {
+      "type": "ban489",
+      "name": "南部屋・海扇閣（淺蟲）",
+      "slug": "kaisenkaku",
+      "adult_key": "4302"
     }
   ],
   "_jalan說明": "Jalan：用車站周邊頁查整區空房。頁面會列出整個「青森・浅虫・八甲田」大區，exclude_keywords 用來濾掉八甲田山區等太遠的旅館。min_interval_min＝最少隔幾分鐘查一次。",
@@ -296,5 +307,29 @@
       "2115"
     ],
     "_note": "Area 117=青森・淺蟲；2115=酸ケ湯（排除）"
+  },
+  "trip": {
+    "enabled": true,
+    "min_interval_min": 30,
+    "city_id": 4351,
+    "child_age": 9,
+    "exclude_keywords": [
+      "八甲田",
+      "酸ケ湯",
+      "酸ヶ湯",
+      "城ヶ倉",
+      "城ケ倉",
+      "谷地温泉",
+      "猿倉",
+      "蔦温泉",
+      "睡蓮沼",
+      "ベルジャヤ",
+      "十和田",
+      "奥入瀬",
+      "中央インター",
+      "浪岡",
+      "青森屋",
+      "三沢"
+    ]
   }
 }
