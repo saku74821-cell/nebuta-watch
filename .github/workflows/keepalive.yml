@@ -1,0 +1,26 @@
+name: keepalive
+
+# GitHub 會把「60 天沒有任何更新」的公開倉庫排程自動關掉。
+# 這個小工作每月 1 號更新一次 keepalive.txt，讓監控一直跑到睡魔祭。
+on:
+  schedule:
+    - cron: "17 3 1 * *"   # 每月 1 號 12:17（日本時間）
+    - cron: "17 3 15 * *"  # 每月 15 號再保險一次
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 更新 keepalive.txt
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > keepalive.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add keepalive.txt
+          git commit -m "keepalive" || exit 0
+          git push
