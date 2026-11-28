@@ -205,7 +205,7 @@ def fmt_yen(v):
     return f"¥{int(v):,}" if isinstance(v, (int, float)) else "價格請見頁面"
 
 
-def notify(cfg, title, lines, click_url=None, buttons=None):
+def notify(cfg, title, lines, click_url=None, buttons=None, priority=5, tags=None):
     n = cfg.get("notify", {})
     body = "\n".join(lines)
     sent = False
@@ -215,7 +215,7 @@ def notify(cfg, title, lines, click_url=None, buttons=None):
         body = body.encode("utf-8")[:3700].decode("utf-8", "ignore") + "\n…（內容太長，已截斷）"
     if topic:
         payload = {"topic": topic, "title": title, "message": body,
-                   "priority": 5, "tags": ["rotating_light"]}
+                   "priority": priority, "tags": tags or ["rotating_light"]}
         if click_url:
             payload["click"] = click_url
         if buttons:
@@ -264,13 +264,16 @@ def guests_total(cfg):
             + g.get("lower_elem_children", 0))
 
 
-def search_official(cfg, stay):
+def search_official(cfg, stay, state):
     """查各飯店官網。回傳 (有空房的 {key: hotel}, 這次有成功查到的 key 集合)。"""
     hotels = cfg.get("official_hotels") or []
     if not hotels:
         return {}, set()
     res = official.check_all(hotels, stay["checkin"], stay["checkout"],
                              guests_total(cfg), log)
+    got = {r["name"] for r in res.values()}
+    for h in hotels:
+        health(state, "官網・" + h["name"], h["name"] in got)
     found = {}
     for k, r in res.items():
         if r["available"]:
@@ -282,8 +285,56 @@ def search_official(cfg, stay):
     return found, {"官網:" + k for k in res}
 
 
+def health(state, name, ok):
+    """記錄每個來源連續失敗幾次（給「監控異常」通知用）。"""
+    h = state.setdefault("_health", {})
+    rec = h.setdefault(name, {"fail": 0, "alerted": False})
+    rec["fail"] = 0 if ok else rec["fail"] + 1
+    rec["last_ok"] = datetime.now().isoformat(timespec="seconds") if ok else rec.get("last_ok")
+
+
+def health_alerts(cfg, state):
+    """某個來源連續失敗太多次（網站改版或擋掉）→ 通知一次；恢復了也通知一次。"""
+    limit = int(cfg.get("health_fail_limit", 15))
+    bad, back = [], []
+    for name, rec in (state.get("_health") or {}).items():
+        if rec["fail"] >= limit and not rec.get("alerted"):
+            bad.append(name); rec["alerted"] = True
+        elif rec["fail"] == 0 and rec.get("alerted"):
+            back.append(name); rec["alerted"] = False
+    if bad:
+        lines = ["下面這些網站連續好幾次查不到（可能網站改版或暫時擋掉），其他網站照常監控："]
+        lines += [f"・{n}" for n in bad] + ["", "把這則通知截圖給 Claude 看就好。"]
+        if not notify(cfg, "⚠️ 睡魔祭監控：有網站查不到", lines, priority=3, tags=["warning"]):
+            for n in bad:
+                state["_health"][n]["alerted"] = False
+    if back:
+        notify(cfg, "✅ 睡魔祭監控：網站恢復了", [f"・{n}" for n in back] + ["這些網站又可以正常監控了。"],
+               priority=2, tags=["white_check_mark"])
+
+
+def heartbeat(cfg, state):
+    """每天早上（日本時間 10 點後）送一則「監控正常運作中」，確定程式還活著。"""
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    if now.hour < 10:
+        return
+    week = now.strftime("%Y-%m-%d")
+    if state.get("_heartbeat_week") == week:
+        return
+    hl = state.get("_health") or {}
+    ok_n = sum(1 for r in hl.values() if r["fail"] == 0)
+    bad = [n for n, r in hl.items() if r["fail"] > 0]
+    lines = [f"監控正常運作中（{ok_n} 個來源正常）。", "目前 8/6–8/8 還沒有新空房的話，代表還沒釋出，程式會繼續盯。"]
+    if bad:
+        lines.append("最近查不到的：" + "、".join(bad[:10]))
+    if notify(cfg, "🟢 睡魔祭監控 每日回報", lines, priority=2, tags=["green_circle"]):
+        state["_heartbeat_week"] = week
+
+
 def _wrap(tag, res, ok, state, prefix):
     """把慢速來源的結果轉成統一格式；查詢成功時，之前有、這次沒出現的都算已確認沒房。"""
+    health(state, tag, ok)
     found = {f"{tag}:{i}": {"hotelNo": i, "name": f"【{tag}】{h['name']}", "url": h["url"],
                             "plans": [], "min_total": None} for i, h in res.items()}
     queried = set(found)
@@ -369,6 +420,7 @@ def check_knt(cfg, state):
     """旅行社方案上架通知（不分日期，只通知一次）。"""
     kcfg = cfg["knt"]
     n = official.check_knt(kcfg, log)
+    health(state, "KNT睡魔祭方案", n is not None)
     if n is None:
         return []
     log(f"KNT 睡魔祭方案：{n} 筆")
@@ -405,7 +457,7 @@ def check_once(cfg, state, send=True):
             log(f"（樂天）{label}：{e}")
             rakuten_ok = False
 
-        off, off_ok = search_official(cfg, stay)  # 官網
+        off, off_ok = search_official(cfg, stay, state)  # 官網
         hotels.update(off)
         queried_ok |= off_ok
         sl, sl_ok, counts = slow_sources(cfg, stay, state, prefix, due)
@@ -465,6 +517,9 @@ def check_once(cfg, state, send=True):
             for k in new_keys:
                 state.pop(k, None)
             log(f"⚠️ 通知送不出去，{len(new_items)} 筆空房下一輪會再通知一次")
+    if send:
+        health_alerts(cfg, state)
+        heartbeat(cfg, state)
     return new_items
 
 
